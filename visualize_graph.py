@@ -178,7 +178,7 @@ def plot_graph(G):
 
 
 if __name__ == "__main__":
-    from tensor import ones
+    from mytorch.tensor import ones
     input_tensor = ones((1,), requires_grad=True)
     output = easy_operation(input_tensor)
     G = build_graph(output)
