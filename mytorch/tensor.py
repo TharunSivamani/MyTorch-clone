@@ -286,6 +286,13 @@ class Tensor:
 
     def backward(self, grad = None, retain_graph=False):
 
+        if retain_graph:
+            if not self._warn_retain_grad:
+                warnings.warn(
+                    "You are retaining graph, intermediate gradients may not be cleared!!"
+                )
+                self._warn_retain_grad = True
+
         if grad is None:
             grad = ap.Array.ones_like(self.data, dtype=self.dtype, device=self.device)
 
