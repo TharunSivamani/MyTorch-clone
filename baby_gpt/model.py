@@ -1,0 +1,196 @@
+import mytorch
+import mytorch.nn as nn
+import numpy as np
+from dataclasses import dataclass
+
+@dataclass
+class BabyGPTConfig:
+
+    vocab_size: int =  65
+    max_seq_len: int = 256
+    embed_dim: int = 384
+    mlp_ratio: int = 4
+    num_blocks: int = 6
+    num_heads: int = 6
+    mlp_dropout_p: float = 0.0
+    attn_dropout_p: float = 0.0 
+    use_full_auto: bool = False
+
+class Embeddings(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+
+        self.config = config
+
+        self.char_embeddings = nn.Embedding(config.vocab_size, config.embed_dim)
+        self.position_embeddings = nn.Embedding(config.max_seq_len, config.embed_dim)
+
+    def forward(self, input_ids):
+
+        batch_size, seq_len = input_ids.shape
+
+        x = self.char_embeddings(input_ids)
+
+        avail_idx = mytorch.arange(start=0, end=seq_len).to(input_ids.device)
+        pos_emb = self.position_embeddings(avail_idx).reshape(1, seq_len, self.config.embed_dim)
+
+        x = x + pos_emb
+
+        return x
+
+class Attention(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+
+        self.config = config
+
+        assert config.embed_dim % config.num_heads == 0
+
+        # Attention head Dim
+        self.embed_dim = config.embed_dim
+        self.num_heads = config.num_heads
+        self.head_dim = config.embed_dim // config.num_heads
+
+        self.qkv_proj = nn.Linear(self.embed_dim, 3 * self.embed_dim, auto=config.use_full_auto)
+        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, auto=config.use_full_auto)
+
+        # Dropouts
+        self.proj_drop = nn.Dropout(dropout_p = config.attn_dropout_p)
+        self.attn_drop = nn.Dropout(dropout_p = config.attn_dropout_p)
+
+        # (Batch, num_heads, seq_len, seq_len)
+        causal_positions = (mytorch.tril(mytorch.ones((1, 1, config.max_seq_len, config.max_seq_len))) == 0)
+        causal_mask = mytorch.masked_fill(mytorch.zeros((1, 1, config.max_seq_len, config.max_seq_len)), causal_positions, value=float("-inf"))
+        self.register_buffer("causal_mask", causal_mask, persistent=False)
+
+    def forward(self, x):
+
+        batch, seq_len, embed_dim = x.shape
+
+        qkv = self.qkv_proj(x) # (Batch, seq_len, 3 * embed_dim)
+        qkv = qkv.reshape(batch, seq_len, self.num_heads, 3 * self.head_dim)
+        qkv = qkv.transpose(1, 2) # (batch, heads, seq_len, 3 * head_dim)
+
+        q, k, v = mytorch.chunk(qkv, 3, dim=-1) # each [batch, num_heads, seq_len, head_dim]
+
+        scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+
+        scores = scores + self.causal_mask[:, :, :seq_len, :seq_len].astype(scores.data.dtype)
+
+        softmax_attention = mytorch.nn.functional.softmax(scores, dim=-1)
+
+        dropped_attention = self.attn_drop(softmax_attention)
+
+        # Attention output
+        output = dropped_attention @ v
+
+        # Return back to original shape
+        output = output.transpose(1, 2).reshape(batch, seq_len, embed_dim)
+
+        # Output Projection
+        output = self.out_proj(output)
+        output = self.proj_drop(output)
+
+        return output
+
+
+class FeedForward(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+
+        self.config = config
+
+        hidden_size = config.embed_dim * config.mlp_ratio
+
+        self.intermediate_dense = nn.Linear(config.embed_dim, hidden_size, auto=config.use_full_auto)
+
+        self.activation = nn.ReLU()
+
+        self.intermediate_dropout = nn.Dropout(config.mlp_dropout_p)
+
+        self.out_proj = nn.Linear(hidden_size, config.embed_dim, auto=config.use_full_auto)
+
+        self.output_dropout = nn.Dropout(config.mlp_dropout_p)
+
+    def forward(self, x):
+        x = self.intermediate_dense(x)
+        x = self.activation(x)
+        x = self.intermediate_dropout(x)
+        x = self.out_proj(x)
+        x = self.output_dropout(x)
+        return x
+    
+class TransformerBlock(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+
+        self.config = config
+        self.embed_dim = config.embed_dim
+        self.attention = Attention(config)
+
+        self.layernorm1 = nn.LayerNorm(config.embed_dim, auto=config.use_full_auto)
+
+        self.feedforward = FeedForward(config)
+        self.layernorm2 = nn.LayerNorm(config.embed_dim, auto=config.use_full_auto)
+
+    def forward(self, x):
+
+        """
+        Older Transformer (Post-LN)
+
+        The original Attention Is All You Need used:
+
+        x = self.layernorm1(x + self.attention(x))
+        x = self.layernorm2(x + self.feedforward(x))
+        """
+        
+        x = x + self.attention(self.layernorm1(x)) # Pre LayerNorm - latest
+        x = x + self.feedforward(self.layernorm2(x))
+        return x
+    
+class BabyGPT(nn.Module):
+
+    def __init__(self, config) -> None:
+        super().__init__()
+
+        self.embeddings = Embeddings(config)
+
+        self.blocks = nn.ModuleList([
+            TransformerBlock(config) for _ in range(config.num_blocks)
+        ])
+
+        self.final_layer_norm = nn.LayerNorm(config.embed_dim, auto=config.use_full_auto)
+        self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, auto=config.use_full_auto)
+
+        self.apply(_init_weights)
+
+    def forward(self, x):
+
+        x = self.embeddings(x)
+
+        for block in self.blocks:
+            x = block(x)
+        
+        x = self.final_layer_norm(x)
+        x = self.lm_head(x)
+
+        return x
+    
+def _init_weights(module):
+    if isinstance(module, nn.Linear):
+        mytorch.nn.init.normal_(module.weight, mean=0, std=0.02)
+        if module.bias is not None:
+            mytorch.nn.init.zeros_(module.bias)
+
+    elif isinstance(module, nn.Embedding):
+        mytorch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    elif isinstance(module, nn.LayerNorm):
+        if module.weight is not None:
+            mytorch.nn.init.ones_(module.weight)
+        if module.bias is not None:
+            mytorch.nn.init.zeros_(module.bias)
