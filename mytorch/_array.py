@@ -191,7 +191,10 @@ class Array:
                 dtype = str(dtype)
 
 
-        if isinstance(data, (np.ndarray, cp.ndarray)):
+        if isinstance(data, Array):
+            data = data._array
+
+        if isinstance(data, (np.ndarray, cp.ndarray if CUDA_AVAILABLE else type(None))):
             self._array = data
         else:
             self._array = np.array(data)
@@ -311,10 +314,8 @@ class Array:
             return Array(data=self.__move_array(arr=self._array, src_dev=self._device, tgt_dev=tgt_dev, tgt_dev_idx=tgt_dev_idx), device=device, dtype=self.dtype)
 
     def __parse_cuda_str(self, device_str):
-        """Parse ``cuda`` / ``cuda:N`` into canonical ``(\"cuda\", index)``."""
         tgt_device = "cuda"
         tgt_device_idx = int(device_str.split(":")[-1]) if ":" in device_str else 0
-
         return tgt_device, tgt_device_idx
     
     def __move_array(self, arr, src_dev, tgt_dev, tgt_dev_idx=None):
@@ -648,10 +649,10 @@ class Array:
         """Call ``numpy.<xp_func>`` or ``cupy.<xp_func>`` and wrap the result."""
         xp = np if "cpu" in device else cp
 
-        _, tgt_device = ("cpu", None)
-
+        # Parse CUDA device
+        _, tgt_device_idx = ("cpu", None)
         if "cuda" in device:
-            _, tgt_device_idx = cls.__parse_cuda_str(device)
+            _, tgt_device_idx = cls(None).__parse_cuda_str(device)
 
         if xp == cp:
             with cp.cuda.Device(tgt_device_idx):

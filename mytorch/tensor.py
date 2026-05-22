@@ -96,7 +96,12 @@ class Tensor:
 
     @data.setter
     def data(self, value):
-        self._data = ap.Array(value)
+        if isinstance(value, ap.Array):
+            self._data = value
+        elif isinstance(value, Tensor):
+            self._data = value._data
+        else:
+            self._data = ap.Array(value)
         return self
 
     @property
@@ -156,7 +161,11 @@ class Tensor:
 
     def to(self, device):
         """Move underlying data to ``device`` in-place (same pattern as :meth:`ap.Array.to`)."""
-        self.data = self.data.to(device)
+        if device == "cuda":
+            device = "cuda:0"
+        if device == self.device:
+            return self
+        self._data = self._data.to(device)
         return self
 
     @classmethod
@@ -775,6 +784,7 @@ class Tensor:
         output_data = np.matmul(self.data, val.data)
 
         def _matmul_backward(input_grad):
+
             if self.requires_grad:
                 grad_self = np.matmul(input_grad, val.data.swapaxes(-1, -2))
                 
@@ -782,7 +792,7 @@ class Tensor:
                     self.grad = grad_self
                 else:
                     self.grad += grad_self
-                
+
                 grad_self = None
 
             if val.requires_grad:
@@ -810,14 +820,17 @@ class Tensor:
         return out
     
     def __truediv__(self, val):
-        
+
         """
+        Element-wise Division of two tensors (accumulated grad for broadcasting)
+
         O = A/B
         dO/dA = 1/B
         dO/dB = -A/B^2
+
         """
 
-        if isinstance(val, Tensor):
+        if isinstance(val, Tensor): 
             self._check_broadcast(self, val)
 
             val_data = val.data
@@ -825,7 +838,6 @@ class Tensor:
             val_shape = val.shape
 
         else:
-
             val_data = ap.Array(val, dtype=self.dtype, device=self.device)
             val_requires_grad = False
             val_shape = None
@@ -833,17 +845,16 @@ class Tensor:
         output = self.data / val_data
 
         def _div_backward(input_grad):
-
             if self.requires_grad:
-                self_grad = input_grad / val.data
+                self_grad = input_grad / val_data
                 self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
-
-                if self.grad is None:
-                    self.grad = grad_self
-                else:
-                    self.grad += grad_self
                 
-                grad_self = None
+                if self.grad is None:
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
+                
+                self_grad = None
 
             if val_requires_grad:
                 val_grad = input_grad * -1 * self.data / (val_data**2)
@@ -855,8 +866,8 @@ class Tensor:
                     val.grad += val_grad
                 
                 val_grad = None
-
-        requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
+        
+        requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
         output = Tensor(
             output,
             requires_grad=requires_grad,
@@ -2228,8 +2239,14 @@ def rand_like(tensor, device=None, dtype=None, requires_grad=False):
                             device=device, dtype=dtype, requires_grad=requires_grad)
 # Like zeros/ones_like
 def zeros_like(tensor, device=None, dtype=None, requires_grad=False):
-    return _tensor_from_array(lambda: ap.Array.zeros_like(tensor.data, device=device, dtype=dtype),
-                            device=device, dtype=dtype, requires_grad=requires_grad)
+    device = device or tensor.device
+    dtype = dtype or str(tensor.dtype)
+    return _tensor_from_array(
+        lambda: ap.Array.zeros_like(tensor.data, device=device, dtype=dtype),
+        device=device,
+        dtype=dtype,
+        requires_grad=requires_grad,
+    )
 
 def ones_like(tensor, device=None, dtype=None, requires_grad=False):
     return _tensor_from_array(lambda: ap.Array.ones_like(tensor.data, device=device, dtype=dtype),

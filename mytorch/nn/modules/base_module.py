@@ -12,7 +12,7 @@ class Module:
         self._modules = {}
         self._buffers = {}
         self._non_persistent_buffers = set()
-        self._training = True
+        self.training = True
     
     def __setattr__(self, name, value):
         
